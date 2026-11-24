@@ -170,3 +170,4 @@ Al finalizar:
 - La operación de particionado es destructiva.
 - La instalación de NixOS no se ejecuta automáticamente: permite revisar y personalizar la configuración antes de continuar.
 - Los scripts se ejecutan mediante Bash, sin necesidad de permisos de ejecución adicionales.
+- 
