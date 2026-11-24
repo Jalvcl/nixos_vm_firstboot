@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# NixOS UTM first-boot installer.
-# Usage: bash bootstrap_utm_vm.sh [/dev/vda]
-# This script intentionally does not run nixos-install: review/edit the
-# generated configuration first, then run: sudo nixos-install
+# Preparación de disco para una instalación de NixOS en UTM.
+# Uso: sudo bash bootstrap_utm_vm.sh [/dev/vda]
+#
+# Este script particiona y formatea el disco, monta los sistemas de
+# archivos y genera la configuración. No ejecuta nixos-install.
 
 if [[ "$EUID" -ne 0 ]]; then
-  echo "Run as root: sudo bash $0 [/dev/vda]" >&2
+  echo "Ejecuta como root: sudo bash $0 [/dev/vda]" >&2
   exit 1
 fi
 
-for cmd in lsblk parted partprobe udevadm mkfs.ext4 mkswap mkfs.fat \
-           mount umount swapoff nixos-generate-config; do
+for cmd in \
+  awk grep lsblk parted partprobe udevadm \
+  mkfs.ext4 mkswap mkfs.fat mount swapon \
+  nixos-generate-config readlink; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Missing required command: $cmd" >&2
-    echo "Run this script from the NixOS installer environment." >&2
+    echo "Falta el comando requerido: $cmd" >&2
+    echo "Ejecuta este script desde el entorno instalador de NixOS." >&2
     exit 1
   fi
 done
@@ -23,64 +26,88 @@ done
 DISK="${1:-}"
 
 if [[ -z "$DISK" ]]; then
-  echo "Available disks:"
+  echo "Discos disponibles:"
   lsblk -dpno NAME,SIZE,MODEL,TYPE | awk '$4 == "disk"'
   echo
-  read -r -p "Target disk (for example /dev/vda): " DISK
+  read -r -p "Disco de destino (por ejemplo, /dev/vda): " DISK
 fi
 
 if [[ ! -b "$DISK" ]]; then
-  echo "Error: '$DISK' is not a valid block device." >&2
+  echo "Error: '$DISK' no es un dispositivo de bloques válido." >&2
   exit 1
 fi
 
 DISK_TYPE="$(lsblk -dn -o TYPE "$DISK" | xargs)"
 if [[ "$DISK_TYPE" != "disk" ]]; then
-  echo "Error: '$DISK' is not a whole disk." >&2
+  echo "Error: '$DISK' no es un disco completo." >&2
   exit 1
 fi
 
 DISK_BYTES="$(lsblk -bnd -o SIZE "$DISK" | xargs)"
 MIN_BYTES=$((16 * 1024 * 1024 * 1024))
-if (( DISK_BYTES < MIN_BYTES )); then
-  echo "Error: disk must be at least 16 GiB for this partition layout." >&2
+
+if ((DISK_BYTES < MIN_BYTES)); then
+  echo "Error: el disco debe tener al menos 16 GiB." >&2
   exit 1
 fi
 
+# Rechaza el disco si alguna de sus particiones está montada.
+while IFS= read -r MOUNTPOINT; do
+  if [[ -n "$MOUNTPOINT" ]]; then
+    echo "Error: hay un sistema de archivos del disco montado en: $MOUNTPOINT" >&2
+    echo "Desmóntalo antes de continuar." >&2
+    exit 1
+  fi
+done < <(lsblk -nrpo MOUNTPOINT "$DISK")
+
+# Rechaza el disco si alguna de sus particiones está activa como swap.
+while IFS= read -r SWAP_DEVICE; do
+  [[ -n "$SWAP_DEVICE" ]] || continue
+
+  SWAP_REAL="$(readlink -f "$SWAP_DEVICE" 2>/dev/null || true)"
+  while IFS= read -r PART; do
+    [[ -n "$PART" ]] || continue
+    PART_REAL="$(readlink -f "$PART" 2>/dev/null || true)"
+
+    if [[ -n "$SWAP_REAL" && "$SWAP_REAL" == "$PART_REAL" ]]; then
+      echo "Error: $PART está activa como swap." >&2
+      echo "Desactívala antes de continuar." >&2
+      exit 1
+    fi
+  done < <(lsblk -lnpo NAME "$DISK" | tail -n +2)
+done < <(swapon --show=NAME --noheadings)
+
 echo
 echo "============================================================"
-echo "WARNING: ALL DATA ON THIS DISK WILL BE DESTROYED"
+echo "ADVERTENCIA: SE BORRARÁN TODOS LOS DATOS DE ESTE DISCO"
 echo "============================================================"
 lsblk -d -o NAME,SIZE,MODEL "$DISK"
 echo
-read -r -p "To confirm, type exactly 'ERASE $DISK': " CONFIRM
+read -r -p "Para confirmar, escribe exactamente 'ERASE $DISK': " CONFIRM
+
 if [[ "$CONFIRM" != "ERASE $DISK" ]]; then
-  echo "Cancelled. No disk changes were made."
+  echo "Cancelado. No se realizaron cambios en el disco."
   exit 1
 fi
 
 echo
-echo "Preparing $DISK..."
+echo "Preparando $DISK..."
 
-# Unmount any mounted child partitions and disable swap on them.
-while read -r PART; do
-  [[ -n "$PART" ]] || continue
-  umount "$PART" 2>/dev/null || true
-  swapoff "$PART" 2>/dev/null || true
-done < <(lsblk -lnpo NAME "$DISK" | tail -n +2)
-
-# Keep the original layout: root, swap, and EFI system partition.
+# Tabla GPT y tres particiones:
+#   1: EFI, aproximadamente 511 MiB
+#   2: raíz ext4, desde 512 MiB hasta 8 GiB antes del final
+#   3: swap, últimos 8 GiB
 parted --script "$DISK" \
   mklabel gpt \
-  mkpart primary 1GiB -8GiB \
-  mkpart primary linux-swap -8GiB 100% \
   mkpart ESP fat32 1MiB 512MiB \
-  set 3 esp on
+  set 1 esp on \
+  mkpart primary ext4 512MiB -8GiB \
+  mkpart primary linux-swap -8GiB 100%
 
 partprobe "$DISK"
 udevadm settle
 
-# Handle both /dev/vda and /dev/nvme0n1-style device names.
+# Admite nombres como /dev/vda y /dev/nvme0n1.
 if [[ "$DISK" =~ [0-9]$ ]]; then
   P1="${DISK}p1"
   P2="${DISK}p2"
@@ -93,34 +120,38 @@ fi
 
 for PART in "$P1" "$P2" "$P3"; do
   if [[ ! -b "$PART" ]]; then
-    echo "Error: expected partition $PART was not created." >&2
+    echo "Error: no se creó la partición esperada $PART." >&2
     exit 1
   fi
 done
 
-mkfs.ext4 -F -L nixos "$P1"
-mkswap -L swap "$P2"
-mkfs.fat -F 32 -n boot "$P3"
+# Formateo según el orden de las particiones:
+#   P1 = EFI, P2 = raíz, P3 = swap
+mkfs.fat -F 32 -n boot "$P1"
+mkfs.ext4 -F -L nixos "$P2"
+mkswap -L swap "$P3"
 
 mkdir -p /mnt
 mount /dev/disk/by-label/nixos /mnt
+
 mkdir -p /mnt/boot
 mount /dev/disk/by-label/boot /mnt/boot
+
 swapon /dev/disk/by-label/swap
 
 nixos-generate-config --root /mnt
 
 echo
 echo "============================================================"
-echo "Bootstrap preparation completed."
+echo "Preparación completada."
 echo "============================================================"
-echo "Generated configuration:"
+echo "Archivos de configuración generados:"
 echo "  /mnt/etc/nixos/configuration.nix"
 echo "  /mnt/etc/nixos/hardware-configuration.nix"
 echo
-echo "Next steps:"
-echo "  1. Review/edit /mnt/etc/nixos/configuration.nix"
-echo "  2. Set up your user, SSH access, networking and boot loader."
-echo "  3. Run: nixos-install"
+echo "Próximos pasos:"
+echo "  1. Revisa y edita /mnt/etc/nixos/configuration.nix."
+echo "  2. Configura el usuario, la red, el acceso SSH y el cargador de arranque."
+echo "  3. Ejecuta: nixos-install"
 echo
-echo "When installation finishes, shut down and remove the installer ISO."
+echo "Al terminar la instalación, apaga la máquina virtual y retira la ISO."
