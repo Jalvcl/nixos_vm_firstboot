@@ -97,12 +97,18 @@ echo "Preparando $DISK..."
 #   1: EFI, aproximadamente 511 MiB
 #   2: raíz ext4, desde 512 MiB hasta 8 GiB antes del final
 #   3: swap, últimos 8 GiB
+
+MIB=$((1024 * 1024))
+SWAP_MIB=$((8 * 1024))
+DISK_MIB=$((DISK_BYTES / MIB))
+ROOT_END_MIB=$((DISK_MIB - SWAP_MIB))
+
 parted --script "$DISK" \
   mklabel gpt \
   mkpart ESP fat32 1MiB 512MiB \
   set 1 esp on \
-  mkpart primary ext4 512MiB -8GiB \
-  mkpart primary linux-swap -8GiB 100%
+  mkpart primary ext4 512MiB "${ROOT_END_MIB}MiB" \
+  mkpart primary linux-swap "${ROOT_END_MIB}MiB" 100%
 
 partprobe "$DISK"
 udevadm settle
