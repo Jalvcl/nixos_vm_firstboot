@@ -147,17 +147,73 @@ swapon /dev/disk/by-label/swap
 
 nixos-generate-config --root /mnt
 
+# echo
+# echo "============================================================"
+# echo "Preparación completada."
+# echo "============================================================"
+# echo "Archivos de configuración generados:"
+# echo "  /mnt/etc/nixos/configuration.nix"
+# echo "  /mnt/etc/nixos/hardware-configuration.nix"
+# echo
+# echo "Próximos pasos:"
+# echo "  1. Revisa y edita /mnt/etc/nixos/configuration.nix."
+# echo "  2. Configura el usuario, la red, el acceso SSH y el cargador de arranque."
+# echo "  3. Ejecuta: nixos-install"
+# echo
+# echo "Al terminar la instalación, apaga la máquina virtual y retira la ISO."
+#
+#
 echo
-echo "============================================================"
-echo "Preparación completada."
-echo "============================================================"
-echo "Archivos de configuración generados:"
-echo "  /mnt/etc/nixos/configuration.nix"
-echo "  /mnt/etc/nixos/hardware-configuration.nix"
+echo "Instalando temporalmente git y GitHub CLI..."
+
+if ! command -v nix-shell >/dev/null 2>&1; then
+  echo "Error: no se encontró nix-shell en el instalador de NixOS." >&2
+  exit 1
+fi
+
+# Instala gh y git de forma temporal para esta sesión del instalador.
+nix-shell -p gh git --run '
+  set -e
+  gh auth login --web --git-protocol https
+  gh auth status
+  gh repo clone Jalvcl/configuraciones /mnt/etc/nixos/configuraciones
+'
+REPO_DIR="/mnt/etc/nixos/configuraciones/NixOS"
+REPO_CONFIG="$REPO_DIR/configuration.nix"
+HW_CONFIG="/mnt/etc/nixos/hardware-configuration.nix"
+
+if [[ ! -f "$REPO_CONFIG" ]]; then
+  echo "Error: no se encontró $REPO_CONFIG" >&2
+  echo "Revisa la ruta del archivo en el repositorio clonado." >&2
+  exit 1
+fi
+
+if [[ ! -f "$HW_CONFIG" ]]; then
+  echo "Error: falta la configuración de hardware generada: $HW_CONFIG" >&2
+  exit 1
+fi
+
 echo
-echo "Próximos pasos:"
-echo "  1. Revisa y edita /mnt/etc/nixos/configuration.nix."
-echo "  2. Configura el usuario, la red, el acceso SSH y el cargador de arranque."
-echo "  3. Ejecuta: nixos-install"
+echo "Repositorio clonado y archivos encontrados."
+echo "Configuración que se usará: $REPO_CONFIG"
+echo "La instalación aún no se ha ejecutado."
+
 echo
-echo "Al terminar la instalación, apaga la máquina virtual y retira la ISO."
+echo "Se instalará NixOS usando:"
+echo "  Raíz:          /mnt"
+echo "  Configuración: $REPO_CONFIG"
+echo
+read -r -p "¿Ejecutar nixos-install ahora? Escribe 'INSTALL' para confirmar: " CONFIRM_INSTALL
+
+if [[ "$CONFIRM_INSTALL" == "INSTALL" ]]; then
+  if ! command -v nixos-install >/dev/null 2>&1; then
+    echo "Error: no se encontró nixos-install." >&2
+    exit 1
+  fi
+
+  nixos-install --root /mnt -I nixos-config="$REPO_CONFIG"
+else
+  echo "Instalación cancelada. El sistema no se instaló."
+  echo "Puedes ejecutarla después con:"
+  echo "  nixos-install --root /mnt -I nixos-config=\"$REPO_CONFIG\""
+fi
