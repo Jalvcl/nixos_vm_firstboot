@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/Jalvcl/nixos_vm_firstboot/refs/heads/main"
 SCRIPT_URL="${REPO_RAW}/bootstrap_utm_vm.sh"
+
 TMP_DIR="$(mktemp -d)"
 BOOTSTRAP="${TMP_DIR}/bootstrap_utm_vm.sh"
 
@@ -12,18 +13,24 @@ cleanup() {
 trap cleanup EXIT
 
 if ! command -v curl >/dev/null 2>&1; then
-  echo "Error: curl is required to download the installer." >&2
+  echo "Error: curl is required."
+  exit 1
+fi
+
+if [[ ! -r /dev/tty ]]; then
+  echo "Error: interactive terminal required."
   exit 1
 fi
 
 echo "Downloading NixOS UTM bootstrap..."
-if ! curl --fail --location --silent --show-error "$SCRIPT_URL" -o "$BOOTSTRAP"; then
-  echo "Download failed. Nothing was changed." >&2
+
+if ! curl -fLsS "$SCRIPT_URL" -o "$BOOTSTRAP"; then
+  echo "Download failed."
   exit 1
 fi
 
 if [[ ! -s "$BOOTSTRAP" ]]; then
-  echo "Error: downloaded file is empty. Nothing was changed." >&2
+  echo "Error: downloaded file is empty."
   exit 1
 fi
 
@@ -34,10 +41,7 @@ echo "No disk changes will be made unless you confirm."
 echo
 
 if [[ "$EUID" -eq 0 ]]; then
-  bash "$BOOTSTRAP" "$@"
-elif command -v sudo >/dev/null 2>&1; then
-  sudo bash "$BOOTSTRAP" "$@"
+  bash "$BOOTSTRAP" "$@" </dev/tty
 else
-  echo "Error: root privileges are required (sudo was not found)." >&2
-  exit 1
+  sudo bash "$BOOTSTRAP" "$@" </dev/tty
 fi
